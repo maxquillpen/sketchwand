@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sketch Wand</title>
+    <style>
+      /* Basic page styling */
+      body {
+        font-family: sans-serif;
+        background: #f7f7f7;
+        margin: 0;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      h1 {
+        margin-bottom: 24px;
+      }
+
+      .container {
+        display: flex;
+        flex-direction: row;
+        width: 100%;
+        max-width: 960px;
+        gap: 24px;
+      }
+
+      .controls,
+      .sketch-container {
+        flex: 1;
+      }
+
+      .label {
+        font-weight: bold;
+        margin-top: 16px;
+        margin-bottom: 4px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        padding: 8px;
+        font-size: 14px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+      }
+
+      input[type="range"] {
+        width: 100%;
+      }
+
+      input[type="color"] {
+        width: 48px;
+        height: 32px;
+        padding: 0;
+        border: none;
+        cursor: pointer;
+      }
+
+      button {
+        padding: 8px 12px;
+        margin-right: 8px;
+        font-size: 14px;
+        cursor: pointer;
+        border: none;
+        border-radius: 4px;
+        background-color: #007bff;
+        color: #fff;
+      }
+
+      button.secondary {
+        background-color: #6c757d;
+      }
+
+      canvas {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 1 / 1;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        touch-action: none;
+        display: block;
+        background-color: #fff;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Sketch Wand</h1>
+    <div class="container">
+      <!-- Controls section -->
+      <div class="controls">
+        <div class="label">Prompt</div>
+        <input
+          type="text"
+          id="prompt"
+          placeholder="Enter a prompt to imagine..."
+        />
+        <div class="label">Colors (comma separated)</div>
+        <input
+          type="text"
+          id="colors"
+          placeholder="e.g. red, blue, green"
+        />
+        <div class="label">Brush Size</div>
+        <input type="range" id="brush" min="1" max="30" value="6" />
+        <div class="label">Color</div>
+        <input type="color" id="stroke" value="#111111" />
+        <div class="toolbar">
+          <button id="submit">Generate</button>
+          <button id="clear" class="secondary">Clear</button>
+        </div>
+      </div>
+      <!-- Sketch section -->
+      <div class="sketch-container">
+        <div class="label">
+          Sketch
+          <button id="undoBtn">↶</button>
+          <button id="redoBtn">↷</button>
+          <button id="clearSketch">⟲</button>
+        </div>
+        <canvas id="c"></canvas>
+      </div>
+    </div>
+
+    <script>
+      // Grab elements
+      const canvas = document.getElementById('c');
+      const ctx = canvas.getContext('2d');
+      const brush = document.getElementById('brush');
+      const strokeColor = document.getElementById('stroke');
+
+      // Drawing state
+      let drawing = false;
+      let last = { x: 0, y: 0 };
+
+      // History stack for undo/redo functionality
+      const history = [];
+      let historyIndex = -1;
+      const MAX_HISTORY = 50;
+
+      // Resize canvas to fit container and handle high DPI displays
+      function resizeCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        // Set the internal buffer size based on the element's size and device pixel ratio
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        // Reset transformation and scale drawing to device pixel ratio
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        // Fill the canvas with a white background
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      // Save current canvas state into history
+      function snapshot() {
+        // If we have undone some states, remove everything after the current index
+        if (historyIndex < history.length - 1) {
+          history.splice(historyIndex + 1);
+        }
+        // Add current canvas state as a data URL
+        history.push(canvas.toDataURL());
+        // Trim history if it exceeds maximum size
+        if (history.length > MAX_HISTORY) history.shift();
+        // Update the history index to the latest
+        historyIndex = history.length - 1;
+      }
+
+      // Restore canvas state from history at a given index
+      function restore(index) {
+        if (index < 0 || index >= history.length) return;
+        const img = new Image();
+        img.onload = () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          // Fill white to ensure transparent areas are white
+          ctx.fillStyle = 'white';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        };
+        img.src = history[index];
+      }
+
+      // Get pointer position relative to canvas
+      function pos(e) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+        };
+      }
+
+      // Pointer down event: start drawing and save a snapshot of the current state
+      function start(e) {
+        drawing = true;
+        last = pos(e);
+        snapshot(); // Save current state before drawing a new stroke
+      }
+
+      // Pointer move event: draw smooth lines using quadratic curves
+      function move(e) {
+        if (!drawing) return;
+        const p = pos(e);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = strokeColor.value;
+        ctx.lineWidth = Number(brush.value);
+        // Calculate midpoint for quadratic curve
+        const midX = (last.x + p.x) / 2;
+        const midY = (last.y + p.y) / 2;
+        ctx.beginPath();
+        ctx.moveTo(last.x, last.y);
+        ctx.quadraticCurveTo(last.x, last.y, midX, midY);
+        ctx.stroke();
+        last = p;
+      }
+
+      // Pointer up event: stop drawing
+      function end() {
+        drawing = false;
+      }
+
+      // Attach pointer event listeners to the canvas
+      canvas.addEventListener('pointerdown', start);
+      canvas.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', end);
+      canvas.addEventListener('pointerup', end);
+
+      // Attach resize handler to maintain canvas size
+      window.addEventListener('resize', () => {
+        resizeCanvas();
+      });
+      // Initial canvas resize
+      resizeCanvas();
+
+      // Button handlers
+      document.getElementById('undoBtn').addEventListener('click', () => {
+        if (historyIndex > 0) {
+          historyIndex--;
+          restore(historyIndex);
+        }
+      });
+
+      document.getElementById('redoBtn').addEventListener('click', () => {
+        if (historyIndex < history.length - 1) {
+          historyIndex++;
+          restore(historyIndex);
+        }
+      });
+
+      document.getElementById('clearSketch').addEventListener('click', () => {
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        snapshot();
+      });
+
+      // Clear the prompt, colors, and canvas entirely
+      document.getElementById('clear').addEventListener('click', () => {
+        document.getElementById('prompt').value = '';
+        document.getElementById('colors').value = '';
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        history.length = 0;
+        historyIndex = -1;
+      });
+
+      // Placeholder for future image generation functionality
+      document.getElementById('submit').addEventListener('click', () => {
+        alert('Image generation is not implemented in this offline version.');
+      });
+    </script>
+  </body>
+</html>
