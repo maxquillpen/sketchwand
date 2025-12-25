@@ -1,0 +1,8 @@
+name	"sketch_app"
+version	"1.0.0"
+description	"Sketch Wand offline clone"
+type	"module"
+scripts	
+start	"node server.js"
+dependencies	
+express	"^4.18.2"
