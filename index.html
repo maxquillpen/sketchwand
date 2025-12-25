@@ -213,6 +213,7 @@
         if (!drawing) return;
         const p = pos(e);
         ctx.lineCap = 'round';
+
         ctx.lineJoin = 'round';
         ctx.strokeStyle = strokeColor.value;
         ctx.lineWidth = Number(brush.value);
@@ -246,7 +247,8 @@
 
       // Button handlers
       document.getElementById('undoBtn').addEventListener('click', () => {
-        if (historyIndex > 0) {
+        if (
+           snapshot();historyIndex > 0) {
           historyIndex--;
           restore(historyIndex);
         }
