@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sketch Wand</title>
+    <title>Sketch Loop</title>
     <style>
       /* Basic page styling */
       body {
@@ -77,6 +77,11 @@
         background-color: #6c757d;
       }
 
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
       canvas {
         width: 100%;
         height: auto;
@@ -105,6 +110,7 @@
         <input
           type="text"
           id="prompt"
+          value="Render as a colorful polished 2D cartoon. Flat fills + simple cel shading. Stay faithful to my drawing."
           placeholder="Enter a prompt to imagine..."
         />
         <div class="label">Colors (comma separated)</div>
@@ -131,6 +137,11 @@
           <button id="clearSketch">⟲</button>
         </div>
         <canvas id="c"></canvas>
+        <!-- Generated image display -->
+        <div id="generated-container" style="display: none; margin-top: 16px;">
+          <div class="label">Generated Image</div>
+          <img id="generated-image" style="width: 100%; height: auto; aspect-ratio: 1 / 1; border: 1px solid #ddd; border-radius: 8px; background-color: #fff;" />
+        </div>
       </div>
     </div>
 
@@ -138,12 +149,18 @@
       // Grab elements
       const canvas = document.getElementById('c');
       const ctx = canvas.getContext('2d');
+      // Enable image smoothing for better rendering quality
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       const brush = document.getElementById('brush');
       const strokeColor = document.getElementById('stroke');
 
       // Drawing state
       let drawing = false;
       let last = { x: 0, y: 0 };
+      let points = []; // Point buffer for strong smoothing
+      let strokePoints = []; // All points in current stroke for post-processing
+      let isRestoring = false; // Flag to prevent resize during restore
 
       // History stack for undo/redo functionality
       const history = [];
@@ -152,6 +169,8 @@
 
       // Resize canvas to fit container and handle high DPI displays
       function resizeCanvas() {
+        // Don't resize if we're currently restoring to prevent canvas resizing during undo
+        if (isRestoring) return;
         const dpr = window.devicePixelRatio || 1;
         const rect = canvas.getBoundingClientRect();
         // Set the internal buffer size based on the element's size and device pixel ratio
@@ -181,13 +200,30 @@
       // Restore canvas state from history at a given index
       function restore(index) {
         if (index < 0 || index >= history.length) return;
+        // Set flag to prevent resize during restore
+        isRestoring = true;
+        // Capture current canvas dimensions - DO NOT modify them as that triggers resize
+        const currentWidth = canvas.width;
+        const currentHeight = canvas.height;
+        const dpr = window.devicePixelRatio || 1;
         const img = new Image();
         img.onload = () => {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          // Fill white to ensure transparent areas are white
+          // Save current transform, reset to identity for buffer operations
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          // Clear and fill at buffer resolution
+          ctx.clearRect(0, 0, currentWidth, currentHeight);
           ctx.fillStyle = 'white';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          ctx.fillRect(0, 0, currentWidth, currentHeight);
+          // Draw image at buffer resolution (toDataURL saves at buffer resolution)
+          ctx.drawImage(img, 0, 0, currentWidth, currentHeight);
+          ctx.restore();
+          // Restore DPR transformation for future drawing
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          // Clear the restoring flag after a short delay to allow rendering to complete
+          setTimeout(() => {
+            isRestoring = false;
+          }, 0);
         };
         img.src = history[index];
       }
@@ -201,35 +237,206 @@
         };
       }
 
-      // Pointer down event: start drawing and save a snapshot of the current state
-      function start(e) {
-        drawing = true;
-        last = pos(e);
-        snapshot(); // Save current state before drawing a new stroke
+      // Calculate smoothed point using weighted average (stronger smoothing like iPhone)
+      function smoothPoint(newPoint, previousPoints, smoothingFactor = 0.85) {
+        if (previousPoints.length === 0) return newPoint;
+        
+        // Use weighted average of recent points for stronger smoothing
+        // More recent points have higher weight
+        let totalWeight = 1;
+        let weightedX = newPoint.x;
+        let weightedY = newPoint.y;
+        
+        // Weight decreases exponentially for older points
+        const numPoints = Math.min(previousPoints.length, 4);
+        for (let i = 0; i < numPoints; i++) {
+          const idx = previousPoints.length - numPoints + i;
+          const weight = Math.pow(smoothingFactor, numPoints - i);
+          weightedX += previousPoints[idx].x * weight;
+          weightedY += previousPoints[idx].y * weight;
+          totalWeight += weight;
+        }
+        
+        return {
+          x: weightedX / totalWeight,
+          y: weightedY / totalWeight
+        };
       }
 
-      // Pointer move event: draw smooth lines using quadratic curves
-      function move(e) {
-        if (!drawing) return;
+      // Pointer down event: start drawing
+      function start(e) {
+        drawing = true;
         const p = pos(e);
-        ctx.lineCap = 'round';
-
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = strokeColor.value;
-        ctx.lineWidth = Number(brush.value);
-        // Calculate midpoint for quadratic curve
-        const midX = (last.x + p.x) / 2;
-        const midY = (last.y + p.y) / 2;
-        ctx.beginPath();
-        ctx.moveTo(last.x, last.y);
-        ctx.quadraticCurveTo(last.x, last.y, midX, midY);
-        ctx.stroke();
+        points = [p]; // Initialize point buffer for real-time smoothing
+        strokePoints = [p]; // Initialize stroke points array for post-processing
         last = p;
       }
 
-      // Pointer up event: stop drawing
+      // Pointer move event: draw smooth lines with strong smoothing
+      function move(e) {
+        if (!drawing) return;
+        const p = pos(e);
+        
+        // Add point to buffer for real-time smoothing
+        points.push(p);
+        
+        // Keep buffer size manageable (last 6 points for stronger smoothing)
+        if (points.length > 6) {
+          points.shift();
+        }
+        
+        // Store all points for post-processing smoothing
+        strokePoints.push(p);
+        
+        // Calculate smoothed point with stronger smoothing factor
+        const smoothed = smoothPoint(p, points.slice(0, -1), 0.85);
+        
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = strokeColor.value;
+        ctx.lineWidth = Number(brush.value);
+        
+        ctx.beginPath();
+        
+        if (points.length === 1) {
+          // First point - just move to it
+          ctx.moveTo(smoothed.x, smoothed.y);
+          last = smoothed;
+        } else if (points.length === 2) {
+          // Second point - draw a line
+          ctx.moveTo(last.x, last.y);
+          ctx.lineTo(smoothed.x, smoothed.y);
+          last = smoothed;
+        } else {
+          // Use cubic bezier for very smooth curves (like iPhone annotate)
+          const prevSmoothed = smoothPoint(points[points.length - 2], points.slice(0, -2), 0.85);
+          const prevPrevSmoothed = points.length > 3 ? smoothPoint(points[points.length - 3], points.slice(0, -3), 0.85) : prevSmoothed;
+          
+          // Calculate control points for very smooth cubic bezier
+          // Use velocity-based control points for natural smoothing
+          const dx = smoothed.x - prevSmoothed.x;
+          const dy = smoothed.y - prevSmoothed.y;
+          const prevDx = prevSmoothed.x - prevPrevSmoothed.x;
+          const prevDy = prevSmoothed.y - prevPrevSmoothed.y;
+          
+          // Control point 1: continue previous velocity with smoothing
+          const tension = 0.4; // Higher tension = smoother curves
+          const ctrl1X = prevSmoothed.x + (prevDx * tension);
+          const ctrl1Y = prevSmoothed.y + (prevDy * tension);
+          
+          // Control point 2: predict current velocity with smoothing
+          const ctrl2X = smoothed.x - (dx * tension);
+          const ctrl2Y = smoothed.y - (dy * tension);
+          
+          ctx.moveTo(last.x, last.y);
+          ctx.bezierCurveTo(ctrl1X, ctrl1Y, ctrl2X, ctrl2Y, smoothed.x, smoothed.y);
+          last = smoothed;
+        }
+        
+        ctx.stroke();
+      }
+
+      // Smooth a complete stroke using all collected points
+      function smoothStroke(allPoints) {
+        if (allPoints.length < 2) return;
+        
+        // Save current drawing state
+        const currentStyle = ctx.strokeStyle;
+        const currentWidth = ctx.lineWidth;
+        const currentCap = ctx.lineCap;
+        const currentJoin = ctx.lineJoin;
+        
+        // Set drawing properties
+        ctx.strokeStyle = currentStyle;
+        ctx.lineWidth = currentWidth;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        ctx.beginPath();
+        
+        if (allPoints.length === 2) {
+          // Simple line for 2 points
+          ctx.moveTo(allPoints[0].x, allPoints[0].y);
+          ctx.lineTo(allPoints[1].x, allPoints[1].y);
+        } else {
+          // Use Catmull-Rom spline for natural smooth curves
+          ctx.moveTo(allPoints[0].x, allPoints[0].y);
+          
+          for (let i = 1; i < allPoints.length - 2; i++) {
+            const p0 = allPoints[Math.max(0, i - 1)];
+            const p1 = allPoints[i];
+            const p2 = allPoints[i + 1];
+            const p3 = allPoints[Math.min(allPoints.length - 1, i + 2)];
+            
+            // Catmull-Rom to Bezier conversion
+            const tension = 0.5; // Controls smoothness (0-1)
+            const cp1x = p1.x + (p2.x - p0.x) / 6 * tension;
+            const cp1y = p1.y + (p2.y - p0.y) / 6 * tension;
+            const cp2x = p2.x - (p3.x - p1.x) / 6 * tension;
+            const cp2y = p2.y - (p3.y - p1.y) / 6 * tension;
+            
+            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+          }
+          
+          // Draw to last point
+          if (allPoints.length > 2) {
+            ctx.lineTo(allPoints[allPoints.length - 1].x, allPoints[allPoints.length - 1].y);
+          }
+        }
+        
+        ctx.stroke();
+      }
+
+      // Pointer up event: stop drawing, smooth the stroke, and save a snapshot
       function end() {
+        if (drawing) {
+          // If we have enough points, apply post-processing smoothing
+          if (strokePoints.length >= 3) {
+            // Use destination-out to erase the rough stroke, then redraw smoothly
+            // This creates a cleaner final result
+            const originalComposite = ctx.globalCompositeOperation;
+            
+            // Erase the last drawn segment (the rough one)
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.strokeStyle = 'rgba(0,0,0,1)';
+            ctx.lineWidth = Number(brush.value) * 1.2; // Slightly wider to ensure full erasure
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            
+            // Erase the rough path by redrawing it
+            if (points.length >= 2) {
+              ctx.beginPath();
+              for (let i = 0; i < points.length - 1; i++) {
+                if (i === 0) {
+                  ctx.moveTo(points[i].x, points[i].y);
+                } else {
+                  ctx.lineTo(points[i].x, points[i].y);
+                }
+              }
+              ctx.stroke();
+            }
+            
+            // Restore composite operation and redraw with smooth stroke
+            ctx.globalCompositeOperation = originalComposite;
+            ctx.strokeStyle = strokeColor.value;
+            ctx.lineWidth = Number(brush.value);
+            
+            // Redraw with smooth stroke using all collected points
+            smoothStroke(strokePoints);
+          } else if (strokePoints.length === 2) {
+            // For very short strokes, just ensure it's drawn
+            ctx.beginPath();
+            ctx.moveTo(strokePoints[0].x, strokePoints[0].y);
+            ctx.lineTo(strokePoints[1].x, strokePoints[1].y);
+            ctx.stroke();
+          }
+          
+          // Save snapshot after the stroke is complete and smoothed
+          snapshot();
+        }
         drawing = false;
+        points = []; // Clear point buffer
+        strokePoints = []; // Clear stroke points
       }
 
       // Attach pointer event listeners to the canvas
@@ -244,11 +451,12 @@
       });
       // Initial canvas resize
       resizeCanvas();
+      // Save initial blank canvas state
+      snapshot();
 
       // Button handlers
       document.getElementById('undoBtn').addEventListener('click', () => {
-        if (
-           snapshot();historyIndex > 0) {
+        if (historyIndex > 0) {
           historyIndex--;
           restore(historyIndex);
         }
@@ -277,9 +485,83 @@
         historyIndex = -1;
       });
 
-      // Placeholder for future image generation functionality
-      document.getElementById('submit').addEventListener('click', () => {
-        alert('Image generation is not implemented in this offline version.');
+      // Generate button handler
+      document.getElementById('submit').addEventListener('click', async () => {
+        const submitBtn = document.getElementById('submit');
+        const generatedContainer = document.getElementById('generated-container');
+        const generatedImage = document.getElementById('generated-image');
+        const promptInput = document.getElementById('prompt');
+        
+        // Check if canvas has any content (not just white)
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const hasContent = imageData.data.some((val, idx) => idx % 4 !== 3 && val !== 255);
+        
+        if (!hasContent) {
+          alert('Please draw something on the canvas first!');
+          return;
+        }
+        
+        // Disable button and show loading state
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Generating...';
+        
+        try {
+          // Export a fixed-size image for the API (keeps mask + image dimensions consistent)
+          const EXPORT_SIZE = 1024;
+          const exportCanvas = document.createElement('canvas');
+          exportCanvas.width = EXPORT_SIZE;
+          exportCanvas.height = EXPORT_SIZE;
+          const exportCtx = exportCanvas.getContext('2d');
+          exportCtx.imageSmoothingEnabled = true;
+          exportCtx.imageSmoothingQuality = 'high';
+          exportCtx.drawImage(canvas, 0, 0, EXPORT_SIZE, EXPORT_SIZE);
+          
+          const imageDataUrl = exportCanvas.toDataURL('image/png');
+          
+          // Fully transparent mask = edits allowed everywhere (must match image dimensions)
+          const maskCanvas = document.createElement('canvas');
+          maskCanvas.width = EXPORT_SIZE;
+          maskCanvas.height = EXPORT_SIZE;
+          const maskDataUrl = maskCanvas.toDataURL('image/png');
+          
+          // Get prompt value and colors
+          const userPrompt = promptInput.value.trim();
+          const extraPrompt = userPrompt || 'Render as a colorful polished 2D cartoon. Flat fills + simple cel shading. Stay faithful to my drawing.';
+          const colors = document.getElementById('colors').value.trim();
+          
+          // Send to API
+          const response = await fetch('/api/bring-to-life', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              imageDataUrl,
+              maskDataUrl,
+              extraPrompt,
+              colors
+            })
+          });
+          
+          if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to generate image');
+          }
+          
+          const data = await response.json();
+          
+          // Display generated image
+          generatedImage.src = data.imageDataUrl;
+          generatedContainer.style.display = 'block';
+          
+        } catch (error) {
+          console.error('Error generating image:', error);
+          alert('Error generating image: ' + error.message);
+        } finally {
+          // Re-enable button
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Generate';
+        }
       });
     </script>
   </body>
