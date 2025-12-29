@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Touch Canvas Test</title>
+    <link rel="stylesheet" href="/widget.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="toolbar">
+        <div class="toolbar__title">Touch Canvas Test</div>
+        <div class="toolbar__buttons">
+          <button id="undoButton" type="button">Undo</button>
+          <button id="clearButton" type="button">Clear</button>
+        </div>
+      </header>
+
+      <section class="canvas-shell">
+        <canvas id="sketchCanvas" aria-label="Drawing canvas"></canvas>
+      </section>
+
+      <section class="debug" aria-live="polite">
+        <div><strong>Pointer:</strong> <span id="pointerStatus">-</span></div>
+        <div><strong>Points:</strong> <span id="pointsStatus">0</span></div>
+      </section>
+    </main>
+
+    <script src="/widget.js" defer></script>
+  </body>
+</html>
