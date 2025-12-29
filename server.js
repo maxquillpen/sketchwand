@@ -15,6 +15,10 @@ const port = process.env.PORT || 3000;
 app.use(express.json({ limit: "25mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+app.get("/widget", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "widget.html"));
+});
+
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.post("/api/bring-to-life", async (req, res) => {
